@@ -245,9 +245,9 @@ endif()
 
 # OpenAL
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  add_compile_options(-include cstdlib)
+  add_compile_options(-include stdlib.h)
 elseif(MSVC)
-  add_compile_options(/FI cstdlib)
+  add_compile_options(/FI stdlib.h)
 endif()
 
 if (NOT ANDROID)
