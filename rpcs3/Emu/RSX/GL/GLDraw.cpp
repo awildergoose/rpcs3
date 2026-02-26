@@ -294,160 +294,233 @@ void GLGSRender::load_texture_env()
 {
 	// Load textures
 	gl::command_context cmd{ gl_state };
-	std::lock_guard lock(m_sampler_mutex);
 
-	for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	// Prepare texture list outside the lock to minimize contention
+	struct texture_load_info {
+		u32 index;
+		bool is_vertex;
+		bool is_sampler_dirty;
+		bool should_load;
+		gl::texture_cache::sampled_image_descriptor previous_state;
+	};
+	std::vector<texture_load_info> textures_to_load;
+
+	// Stage 1: Collect texture info with minimal locking
 	{
-		if (!(textures_ref & 1))
+		std::lock_guard lock(m_sampler_mutex);
+
+		// Fragment textures
+		for (u32 textures_ref = current_fp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
-			continue;
-		}
-
-		if (!fs_sampler_state[i])
-		{
-			fs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
-		}
-
-		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
-		const auto& tex = rsx::method_registers.fragment_textures[i];
-		const auto previous_format_class = sampler_state->format_class;
-
-		if (!m_samplers_dirty &&
-			!m_textures_dirty[i] &&
-			!m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
-		{
-			continue;
-		}
-
-		const bool is_sampler_dirty = m_textures_dirty[i];
-		m_textures_dirty[i] = false;
-
-		if (!tex.enabled())
-		{
-			*sampler_state = {};
-			continue;
-		}
-
-		*sampler_state = m_gl_texture_cache.upload_texture(cmd, tex, m_rtts);
-		if (!sampler_state->validate())
-		{
-			continue;
-		}
-
-		if (!is_sampler_dirty)
-		{
-			if (sampler_state->format_class != previous_format_class)
+			if (!(textures_ref & 1))
 			{
-				// Host details changed but RSX is not aware
-				m_graphics_state |= rsx::fragment_program_state_dirty;
-			}
-
-			if (sampler_state->format_ex)
-			{
-				// Nothing to change, use cached sampler
 				continue;
 			}
-		}
 
-		sampler_state->format_ex = tex.format_ex();
-
-		if (sampler_state->format_ex.texel_remap_control &&
-			sampler_state->image_handle &&
-			sampler_state->upload_context == rsx::texture_upload_context::shader_read &&
-			(current_fp_metadata.bx2_texture_reads_mask & (1u << i)) == 0 &&
-			!g_cfg.video.disable_hardware_texel_remapping) [[ unlikely ]]
-		{
-			// Check if we need to override the view format
-			const auto gl_format = sampler_state->image_handle->view_format();
-			GLenum format_override = gl_format;
-			rsx::flags32_t flags_to_erase = 0u;
-			rsx::flags32_t host_flags_to_set = 0u;
-
-			if (sampler_state->format_ex.hw_SNORM_possible())
+			if (!fs_sampler_state[i])
 			{
-				format_override = gl::get_compatible_snorm_format(gl_format);
-				flags_to_erase = rsx::texture_control_bits::SEXT_MASK;
-				host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SNORM;
-			}
-			else if (sampler_state->format_ex.hw_SRGB_possible())
-			{
-				format_override = gl::get_compatible_srgb_format(gl_format);
-				flags_to_erase = rsx::texture_control_bits::GAMMA_CTRL_MASK;
-				host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SRGB;
+				fs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
 			}
 
-			if (format_override != GL_NONE && format_override != gl_format)
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
+			const auto& tex = rsx::method_registers.fragment_textures[i];
+
+			bool should_update = m_samplers_dirty ||
+				m_textures_dirty[i] ||
+				m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex);
+
+			if (should_update)
 			{
-				sampler_state->image_handle = sampler_state->image_handle->as(format_override);
-				sampler_state->format_ex.texel_remap_control &= (~flags_to_erase);
-				sampler_state->format_ex.host_features |= host_flags_to_set;
+				const bool is_sampler_dirty = m_textures_dirty[i];
+				m_textures_dirty[i] = false;
+
+				texture_load_info info{
+					.index = i,
+					.is_vertex = false,
+					.is_sampler_dirty = is_sampler_dirty,
+					.should_load = tex.enabled(),
+					.previous_state = *sampler_state
+				};
+				textures_to_load.push_back(info);
 			}
 		}
 
-		m_fs_sampler_states[i].apply(tex, fs_sampler_state[i].get());
-
-		const auto texture_format = sampler_state->format_ex.format();
-		// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
-		// If accurate graphics are desired, force a bitcast to COLOR as a workaround.
-		const bool is_depth_reconstructed = sampler_state->format_class != rsx::classify_format(texture_format) &&
-			(texture_format == CELL_GCM_TEXTURE_A8R8G8B8 || texture_format == CELL_GCM_TEXTURE_D8R8G8B8);
-		// SNORM conversion required in shader. Do not interpolate to avoid introducing discontinuities due to how negative numbers work
-		const bool is_snorm = (sampler_state->format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0;
-
-		if (is_depth_reconstructed || is_snorm)
+		// Vertex textures  
+		for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
 		{
-			// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
-			m_fs_sampler_states[i].set_parameteri(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			m_fs_sampler_states[i].set_parameteri(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			if (!(textures_ref & 1))
+			{
+				continue;
+			}
+
+			if (!vs_sampler_state[i])
+			{
+				vs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
+			}
+
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
+			const auto& tex = rsx::method_registers.vertex_textures[i];
+
+			bool should_update = m_samplers_dirty ||
+				m_vertex_textures_dirty[i] ||
+				m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex);
+
+			if (should_update)
+			{
+				const bool is_sampler_dirty = m_vertex_textures_dirty[i];
+				m_vertex_textures_dirty[i] = false;
+
+				texture_load_info info{
+					.index = i,
+					.is_vertex = true,
+					.is_sampler_dirty = is_sampler_dirty,
+					.should_load = tex.enabled(),
+					.previous_state = *sampler_state
+				};
+				textures_to_load.push_back(info);
+			}
 		}
 	}
 
-	for (u32 textures_ref = current_vp_metadata.referenced_textures_mask, i = 0; textures_ref; textures_ref >>= 1, ++i)
+	// Stage 2: Perform GPU uploads outside the lock (expensive operations)
+	std::vector<std::pair<texture_load_info, gl::texture_cache::sampled_image_descriptor>> uploads;
+	for (const auto& info : textures_to_load)
 	{
-		if (!(textures_ref & 1))
+		if (!info.should_load)
 		{
 			continue;
 		}
 
-		if (!vs_sampler_state[i])
+		// GPU upload - done outside the lock
+		gl::texture_cache::sampled_image_descriptor new_state;
+		if (info.is_vertex)
 		{
-			vs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
+			new_state = m_gl_texture_cache.upload_texture(cmd, rsx::method_registers.vertex_textures[info.index], m_rtts);
+		}
+		else
+		{
+			new_state = m_gl_texture_cache.upload_texture(cmd, rsx::method_registers.fragment_textures[info.index], m_rtts);
 		}
 
-		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
-		const auto& tex = rsx::method_registers.vertex_textures[i];
-		const auto previous_format_class = sampler_state->format_class;
+		if (new_state.validate())
+		{
+			uploads.emplace_back(info, new_state);
+		}
+	}
 
-		if (!m_samplers_dirty &&
-			!m_vertex_textures_dirty[i] &&
-			!m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
+	// Stage 3: Update sampler states and clear disabled textures with lock
+	std::lock_guard lock(m_sampler_mutex);
+
+	// First, handle cleared (disabled) textures
+	for (const auto& info : textures_to_load)
+	{
+		if (info.should_load)
 		{
 			continue;
 		}
 
-		const bool is_sampler_dirty = m_vertex_textures_dirty[i];
-		m_vertex_textures_dirty[i] = false;
-
-		if (!tex.enabled())
+		if (info.is_vertex)
 		{
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[info.index].get());
 			*sampler_state = {};
-			continue;
 		}
-
-		*sampler_state = m_gl_texture_cache.upload_texture(cmd, rsx::method_registers.vertex_textures[i], m_rtts);
-
-		if (!sampler_state->validate())
+		else
 		{
-			continue;
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[info.index].get());
+			*sampler_state = {};
 		}
+	}
 
-		if (is_sampler_dirty)
+	// Then, update successfully uploaded textures
+	for (const auto& [info, new_state] : uploads)
+	{
+		if (info.is_vertex)
 		{
-			m_vs_sampler_states[i].apply(tex, vs_sampler_state[i].get());
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[info.index].get());
+			const auto& tex = rsx::method_registers.vertex_textures[info.index];
+			*sampler_state = new_state;
+
+			if (info.is_sampler_dirty)
+			{
+				m_vs_sampler_states[info.index].apply(tex, sampler_state);
+			}
+			else if (sampler_state->format_class != info.previous_state.format_class)
+			{
+				m_graphics_state |= rsx::vertex_program_state_dirty;
+			}
 		}
-		else if (sampler_state->format_class != previous_format_class)
+		else
 		{
-			m_graphics_state |= rsx::vertex_program_state_dirty;
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[info.index].get());
+			const auto& tex = rsx::method_registers.fragment_textures[info.index];
+			*sampler_state = new_state;
+
+			if (!info.is_sampler_dirty)
+			{
+				if (sampler_state->format_class != info.previous_state.format_class)
+				{
+					// Host details changed but RSX is not aware
+					m_graphics_state |= rsx::fragment_program_state_dirty;
+				}
+
+				if (sampler_state->format_ex)
+				{
+					// Skip additional format ops - already applied
+					continue;
+				}
+			}
+
+			sampler_state->format_ex = tex.format_ex();
+
+			if (sampler_state->format_ex.texel_remap_control &&
+				sampler_state->image_handle &&
+				sampler_state->upload_context == rsx::texture_upload_context::shader_read &&
+				(current_fp_metadata.bx2_texture_reads_mask & (1u << info.index)) == 0 &&
+				!g_cfg.video.disable_hardware_texel_remapping) [[ unlikely ]]
+			{
+				// Check if we need to override the view format
+				const auto gl_format = sampler_state->image_handle->view_format();
+				GLenum format_override = gl_format;
+				rsx::flags32_t flags_to_erase = 0u;
+				rsx::flags32_t host_flags_to_set = 0u;
+
+				if (sampler_state->format_ex.hw_SNORM_possible())
+				{
+					format_override = gl::get_compatible_snorm_format(gl_format);
+					flags_to_erase = rsx::texture_control_bits::SEXT_MASK;
+					host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SNORM;
+				}
+				else if (sampler_state->format_ex.hw_SRGB_possible())
+				{
+					format_override = gl::get_compatible_srgb_format(gl_format);
+					flags_to_erase = rsx::texture_control_bits::GAMMA_CTRL_MASK;
+					host_flags_to_set = rsx::RSX_HOST_FORMAT_FEATURE_SRGB;
+				}
+
+				if (format_override != GL_NONE && format_override != gl_format)
+				{
+					sampler_state->image_handle = sampler_state->image_handle->as(format_override);
+					sampler_state->format_ex.texel_remap_control &= (~flags_to_erase);
+					sampler_state->format_ex.host_features |= host_flags_to_set;
+				}
+			}
+
+			m_fs_sampler_states[info.index].apply(tex, sampler_state);
+
+			const auto texture_format = sampler_state->format_ex.format();
+			// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
+			// If accurate graphics are desired, force a bitcast to COLOR as a workaround.
+			const bool is_depth_reconstructed = sampler_state->format_class != rsx::classify_format(texture_format) &&
+				(texture_format == CELL_GCM_TEXTURE_A8R8G8B8 || texture_format == CELL_GCM_TEXTURE_D8R8G8B8);
+			// SNORM conversion required in shader. Do not interpolate to avoid introducing discontinuities due to how negative numbers work
+			const bool is_snorm = (sampler_state->format_ex.texel_remap_control & rsx::texture_control_bits::SEXT_MASK) != 0;
+
+			if (is_depth_reconstructed || is_snorm)
+			{
+				// Depth format redirected to BGRA8 resample stage. Do not filter to avoid bits leaking.
+				m_fs_sampler_states[info.index].set_parameteri(GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+				m_fs_sampler_states[info.index].set_parameteri(GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			}
 		}
 	}
 
