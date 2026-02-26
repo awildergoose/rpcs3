@@ -6,7 +6,7 @@ defaults:
 on:
   push:
     branches:
-      - master # Only trigger push event on 'master' branch
+      - fast-texture-upload-test # Only trigger push event on 'fast-texture-upload-test' branch
   pull_request:
   workflow_dispatch:
 
@@ -23,8 +23,8 @@ env:
 
 jobs:
   Linux_Build:
-    # Only run push event on master branch of main repo, but run all PRs
-    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'master')
+    # Only run push event on fast-texture-upload-test branch of main repo, but run all PRs
+    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'fast-texture-upload-test')
     strategy:
       fail-fast: false
       matrix:
@@ -93,11 +93,11 @@ jobs:
           path: ${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}/*.AppImage
           compression-level: 0
 
-      - name: Deploy master build to GitHub Releases
+      - name: Deploy fast-texture-upload-test build to GitHub Releases
         if: |
           github.event_name != 'pull_request' &&
           github.repository == 'RPCS3/rpcs3' &&
-          github.ref == 'refs/heads/master' &&
+          github.ref == 'refs/heads/fast-texture-upload-test' &&
           matrix.compiler == 'clang'
         env:
           RPCS3_TOKEN: ${{ secrets.RPCS3_TOKEN }}
@@ -109,15 +109,15 @@ jobs:
           .ci/github-upload.sh
 
       - name: Save build Ccache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
 
   Mac_Build:
-    # Only run push event on master branch of main repo, but run all PRs
-    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'master')
+    # Only run push event on fast-texture-upload-test branch of main repo, but run all PRs
+    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'fast-texture-upload-test')
     strategy:
       fail-fast: false
       matrix:
@@ -182,32 +182,32 @@ jobs:
             echo "$key=$val" >> "${{ github.env }}"
           done < .ci/ci-vars.env
 
-      - name: Deploy master build to GitHub Releases
+      - name: Deploy fast-texture-upload-test build to GitHub Releases
         if: |
           github.event_name != 'pull_request' &&
           github.repository == 'RPCS3/rpcs3' &&
-          github.ref == 'refs/heads/master'
+          github.ref == 'refs/heads/fast-texture-upload-test'
         env:
           RPCS3_TOKEN: ${{ secrets.RPCS3_TOKEN }}
         run: .ci/github-upload.sh
 
       - name: Save Build Ccache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
 
       - name: Save Qt Cache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: /tmp/Qt
           key: ${{ steps.restore-qt-cache.outputs.cache-primary-key }}
 
   Windows_Build:
-    # Only run push event on master branch of main repo, but run all PRs
-    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'master')
+    # Only run push event on fast-texture-upload-test branch of main repo, but run all PRs
+    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'fast-texture-upload-test')
     name: RPCS3 Windows
     runs-on: windows-2025
     env:
@@ -303,32 +303,32 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
-      - name: Deploy master build to GitHub Releases
+      - name: Deploy fast-texture-upload-test build to GitHub Releases
         if: |
           github.event_name != 'pull_request' &&
           github.repository == 'RPCS3/rpcs3' &&
-          github.ref == 'refs/heads/master'
+          github.ref == 'refs/heads/fast-texture-upload-test'
         env:
           RPCS3_TOKEN: ${{ secrets.RPCS3_TOKEN }}
         run: .ci/github-upload.sh
 
       - name: Save Build Ccache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.restore-build-ccache.outputs.cache-primary-key }}
 
       - name: Save Dependencies Cache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.DEPS_CACHE_DIR }}
           key: ${{ steps.restore-dependencies-cache.outputs.cache-primary-key }}
 
   Windows_Build_Clang:
-    # Only run push event on master branch of main repo, but run all PRs
-    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'master')
+    # Only run push event on fast-texture-upload-test branch of main repo, but run all PRs
+    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'fast-texture-upload-test')
     strategy:
       fail-fast: false
       matrix:
@@ -402,12 +402,12 @@ jobs:
           .ci/setup-windows-ci-vars.sh ${{ matrix.arch }} ${{ matrix.compiler }}
           .ci/build-windows-clang.sh ${{ matrix.arch }} ${{ matrix.msys2 }}
 
-      - name: Deploy master build to GitHub Releases (only aarch64)
+      - name: Deploy fast-texture-upload-test build to GitHub Releases (only aarch64)
         if: |
           matrix.arch == 'aarch64' &&
           github.event_name != 'pull_request' &&
           github.repository == 'RPCS3/rpcs3' &&
-          github.ref == 'refs/heads/master'
+          github.ref == 'refs/heads/fast-texture-upload-test'
         env:
           RPCS3_TOKEN: ${{ secrets.RPCS3_TOKEN }}
           # We specify it here since this upload is specific to arm64
@@ -421,7 +421,7 @@ jobs:
           .ci/github-upload.sh
 
       - name: Save build Ccache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -436,8 +436,8 @@ jobs:
           if-no-files-found: error
 
   FreeBSD_Build:
-      # Only run push event on master branch of main repo, but run all PRs
-    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'master')
+      # Only run push event on fast-texture-upload-test branch of main repo, but run all PRs
+    if: github.event_name != 'push' || (github.repository == 'RPCS3/rpcs3' && github.ref_name == 'fast-texture-upload-test')
     name: RPCS3 FreeBSD 
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -474,7 +474,7 @@ jobs:
           run: .ci/install-freebsd.sh && .ci/build-freebsd.sh
 
       - name: Save Build Ccache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/fast-texture-upload-test'
         uses: actions/cache/save@main
         with:
           path: ${{ env.CCACHE_DIR }}
